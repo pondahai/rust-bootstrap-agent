@@ -4,6 +4,7 @@
 
 # 記憶與紀錄 (建議不要上傳，保持 GitHub 乾淨)
 /storage/history.md
+/storage/input_history.txt
 /conversation_log.txt
 /today_news.rss
 
