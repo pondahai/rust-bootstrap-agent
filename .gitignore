@@ -1,0 +1,17 @@
+# Rust 產物
+/target/
+**/*.rs.bk
+
+# 記憶與紀錄 (建議不要上傳，保持 GitHub 乾淨)
+/storage/history.md
+/conversation_log.txt
+/today_news.rss
+
+# 腳本與插件 (如果您想分享自己寫的工具，可以移除這兩行)
+/scripts/*
+!/scripts/.gitkeep
+/plugins/*
+!/plugins/.gitkeep
+
+# 敏感資訊 (未來若有 .env 請務必排除)
+.env
