@@ -2,6 +2,7 @@ mod executor;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::io::{self, Write};
 use std::env;
@@ -21,13 +22,9 @@ struct Message {
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Value>,
     stream: bool,
-    stream_options: Option<StreamOptions>,
-}
-
-#[derive(Serialize)]
-struct StreamOptions {
-    include_usage: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -71,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：你目前在 Telegram (手機)。嚴禁編造假數據。如果執行指令失敗，請誠實告知。".to_string() 
+            content: "注意：用戶目前在手機 (Telegram)。請遵循「計畫模式」：先輸出計畫與 JSON 指令，嚴禁直接回報數據。過程會被自動隱藏。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -79,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rl = DefaultEditor::new()?;
-    println!("--- 🧠 Rust Bootstrap Agent ---");
+    println!("--- 🧠 Rust Bootstrap Agent (Plan Mode) ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -115,6 +112,7 @@ async fn process_and_respond(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut step_count = 0;
     const MAX_STEPS: i32 = 10;
+    let tools_spec = executor::get_tools_spec();
 
     if !is_silent { enable_raw_mode().ok(); }
 
@@ -125,8 +123,8 @@ async fn process_and_respond(
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
+            tools: Some(tools_spec.clone()), // 發送工具定義
             stream: true,
-            stream_options: None,
         };
 
         let mut full_content = String::new();
@@ -157,16 +155,24 @@ async fn process_and_respond(
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { println!("{}", exec_result); }
             
-            // 強力攔截：如果看到失敗標記，強制注入否定命令
+            // 強制數據注入並提示計畫執行狀態
             let feedback = if exec_result.contains("!!! 指令失敗 !!!") {
-                format!("【硬性攔截】指令執行失敗了！原始錯誤回傳如下：\n{}\n請停止一切編造與模擬行為。誠實告訴用戶執行失敗的原因，嚴禁提供任何數值！", exec_result)
+                format!("【計畫執行失敗】原始錯誤回傳：\n{}\n請修正計畫或回報錯誤，嚴禁根據記憶編造數據！", exec_result)
             } else {
-                format!("這是物理執行的真實輸出：\n{}", exec_result)
+                format!("【工具回傳成功】真實 Stdout 如下：\n{}\n請根據此數據進行下一步或給出最終答案。", exec_result)
             };
             
             messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
+            // 檢查幻覺：如果計畫中提到「獲取/查詢」但沒有實際 Action，則攔截
+            if full_content.contains("計畫") && (full_content.contains("查詢") || full_content.contains("抓取")) && step_count == 0 {
+                 let warning = "【系統警告】你制定了計畫但尚未調用工具！請立即輸出 JSON 指令以獲取數據，禁止直接給出答案。";
+                 messages.push(Message { role: "user".to_string(), content: warning.to_string() });
+                 step_count += 1;
+                 continue;
+            }
+
             if is_silent { println!("{}", full_content); }
             break;
         }

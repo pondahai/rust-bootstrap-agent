@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::process::Command;
 use std::fs;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AgentAction {
+    pub plan: Option<String>,
     pub action: String,
     pub args: Value,
 }
@@ -20,6 +21,57 @@ pub struct PromoteSkillArgs {
     pub script_name: String,
     pub skill_name: String,
     pub description: String,
+}
+
+/// 返回供 API 使用的工具定義 (OpenAI 標準)
+pub fn get_tools_spec() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "execute_command",
+                "description": "執行 Linux 系統指令，如 curl, ls, grep 等以獲取即時資訊。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "args": { "type": "string", "description": "要執行的完整指令字串" }
+                    },
+                    "required": ["args"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_script",
+                "description": "儲存任務專用的臨時腳本到 ./scripts/ 目錄。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "腳本檔名" },
+                        "content": { "type": "string", "description": "腳本內容" }
+                    },
+                    "required": ["name", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "promote_skill",
+                "description": "將已驗證成功的腳本從 ./scripts/ 移動至 ./plugins/ 並記錄為永久技能。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "script_name": { "type": "string", "description": "原腳本檔名" },
+                        "skill_name": { "type": "string", "description": "新技能名稱" },
+                        "description": { "type": "string", "description": "技能功能描述" }
+                    },
+                    "required": ["script_name", "skill_name", "description"]
+                }
+            }
+        }
+    ])
 }
 
 pub fn extract_json_and_execute(content: &str) -> Option<String> {
@@ -43,10 +95,12 @@ pub fn extract_json_and_execute(content: &str) -> Option<String> {
     };
 
     if let Ok(action) = serde_json::from_str::<AgentAction>(&json_str) {
+        if let Some(p) = &action.plan { println!("📋 計畫: {}", p); }
         return perform_action(action);
     } else if let Ok(actions) = serde_json::from_str::<Vec<AgentAction>>(&json_str) {
         let mut results = Vec::new();
         for action in actions {
+            if let Some(p) = &action.plan { println!("📋 計畫: {}", p); }
             if let Some(res) = perform_action(action) {
                 results.push(res);
             }
@@ -62,14 +116,11 @@ fn perform_action(action: AgentAction) -> Option<String> {
             let cmd = action.args.as_str().unwrap_or("");
             println!("--- 執行指令: {} ---", cmd);
             let output = Command::new("sh").arg("-c").arg(cmd).output();
-
             match output {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
                     let status = o.status.code().map_or("Unknown".to_string(), |c| c.to_string());
-                    
-                    // 強化失敗報告
                     if status != "0" || stdout.contains("Bad Request") || stdout.contains("400") {
                         Some(format!("【!!! 指令失敗 !!!】\nExit Code: {}\nSTDOUT (包含錯誤):\n{}\nSTDERR:\n{}", status, stdout, stderr))
                     } else {
@@ -82,7 +133,6 @@ fn perform_action(action: AgentAction) -> Option<String> {
         "save_script" => {
             if let Ok(args) = serde_json::from_value::<SaveFileArgs>(action.args) {
                 let path = format!("./scripts/{}", args.name);
-                println!("--- 儲存任務腳本: {} ---", path);
                 match fs::write(&path, &args.content) {
                     Ok(_) => Some(format!("成功將腳本儲存至 {}", path)),
                     Err(e) => Some(format!("儲存腳本失敗: {}", e)),
@@ -109,15 +159,6 @@ fn perform_action(action: AgentAction) -> Option<String> {
                     Err(e) => Some(format!("檔案移動成功，但更新系統手冊失敗: {}", e)),
                 }
             } else { Some("promote_skill 參數格式錯誤".to_string()) }
-        },
-        "save_plugin" => {
-            if let Ok(args) = serde_json::from_value::<SaveFileArgs>(action.args) {
-                let path = format!("./plugins/{}", args.name);
-                match fs::write(&path, &args.content) {
-                    Ok(_) => Some(format!("成功將插件儲存至 {}", path)),
-                    Err(e) => Some(format!("儲存插件失敗: {}", e)),
-                }
-            } else { Some("save_plugin 參數格式錯誤".to_string()) }
         },
         _ => Some(format!("未知的行動類型: {}", action.action)),
     }
