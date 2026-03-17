@@ -10,7 +10,6 @@ use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::time::Duration;
 use rustyline::DefaultEditor;
-use rustyline::error::ReadlineError;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Message {
@@ -73,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：用戶目前在手機 (Telegram)。嚴禁編造假數據。如果執行指令失敗（如 429 或空輸出），請誠實告知。".to_string() 
+            content: "注意：用戶目前在手機 (Telegram)。嚴禁編造假數據。我看得到 execute_command 的真實 Stdout。請根據真實輸出進行總結，若回報與輸出不符即為失敗。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -166,19 +165,18 @@ async fn process_and_respond(
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { print_raw(&format!("{}\r\n", exec_result)); }
             
-            // 幻覺攔截：如果指令結果異常，注入強烈提醒
-            let feedback = if exec_result.contains("Too Many Requests") || exec_result.is_empty() {
-                format!("【系統警示】執行失敗：{}。請誠實回報無法獲取數據，嚴禁憑空編造！", exec_result)
-            } else {
-                format!("這是執行結果：\n{}", exec_result)
-            };
+            // 實體數據注入：將真實結果餵回 Agent，並強制要求誠實
+            let feedback = format!(
+                "這是物理執行的真實 Stdout (前 1000 字元)：\n---\n{}\n---\n請『僅』根據上述真實數據進行回覆。如果數據顯示為空或 429，請誠實回報無資料，嚴禁根據記憶編造日期或數字！", 
+                if exec_result.len() > 1000 { &exec_result[..1000] } else { &exec_result }
+            );
             
             messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
             if is_silent {
                 if full_content.trim().is_empty() {
-                    println!("🤖 [System] 任務已處理，但 Agent 未產出任何回覆。");
+                    println!("🤖 [System] 處理中...");
                 } else {
                     println!("{}", full_content);
                 }
