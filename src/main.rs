@@ -54,7 +54,7 @@ struct ChunkDelta {
     content: Option<String>,
 }
 
-// 預設配置 (若環境變數未設定時使用)
+// 預設配置
 const DEFAULT_API_ENDPOINT: &str = "http://192.168.0.110:8001/v1/chat/completions";
 const DEFAULT_MODEL_NAME: &str = "openai/gpt-oss-120b";
 
@@ -64,42 +64,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let single_input = if args.len() > 1 { Some(args[1..].join(" ")) } else { None };
 
-    // 動態讀取配置
     let api_endpoint = env::var("LLM_API_URL").unwrap_or_else(|_| DEFAULT_API_ENDPOINT.to_string());
     let model_name = env::var("LLM_MODEL_NAME").unwrap_or_else(|_| DEFAULT_MODEL_NAME.to_string());
 
-    // 讀取 System Prompt
-    let system_prompt = fs::read_to_string("storage/system.md")
-        .expect("無法讀取 storage/system.md");
-
-    // 讀取歷史紀錄
+    let system_prompt = fs::read_to_string("storage/system.md").expect("無法讀取 storage/system.md");
     let history_path = "storage/history.md";
     let history_json = fs::read_to_string(history_path).unwrap_or_else(|_| "[]".to_string());
     let mut messages: Vec<Message> = serde_json::from_str(&history_json).unwrap_or_default();
 
-    // 同步 System Prompt
     if !messages.is_empty() && messages[0].role == "system" {
         messages[0].content = system_prompt.clone();
     } else {
-        messages.insert(0, Message {
-            role: "system".to_string(),
-            content: system_prompt.clone(),
-        });
+        messages.insert(0, Message { role: "system".to_string(), content: system_prompt.clone() });
     }
 
     if let Some(input) = single_input {
-        // --- 單次模式 (Telegram / 一次性呼叫) ---
-        // 注入手機模式簡潔提示
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：用戶目前正透過 Telegram (手機) 與你對話。請保持回覆簡潔、美觀。除非用戶要求，否則嚴禁輸出原始程式碼或內部的路徑資訊。請直接提供任務結果，並在最後以一行文字總結你的進化行動（如有）。".to_string() 
+            content: "注意：用戶目前正透過 Telegram (手機) 與你對話。請保持回覆簡潔、美觀。除非用戶要求，否則嚴禁輸出原始程式碼。中間的執行過程將被自動隱藏，請直接在最後一步給出完整答案。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
         return Ok(());
     }
 
-    // --- 互動模式 (Terminal CLI) ---
     let mut rl = DefaultEditor::new()?;
     let history_file = "storage/input_history.txt";
     let _ = rl.load_history(history_file);
@@ -107,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- 🧠 Rust Bootstrap Agent (V0) ---");
     println!("📡 API: {}", api_endpoint);
     println!("🤖 Model: {}", model_name);
-    println!("輸入 '/exit' 結束。輸入 '/help' 說明。輸入 '/clear' 重置。執行中按 [ESC] 打斷。");
+    println!("輸入 '/exit' 結束。'/clear' 重置。按 [ESC] 打斷。");
 
     loop {
         disable_raw_mode().ok(); 
@@ -123,10 +111,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if input.is_empty() { continue; }
         if input == "/exit" { break; }
-        if input == "/help" {
-            println!("\n[系統指令]\n  /exit   - 結束\n  /clear  - 重置\n");
-            continue;
-        }
         if input == "/clear" {
             messages.clear();
             messages.push(Message { role: "system".to_string(), content: system_prompt.clone() });
@@ -199,10 +183,7 @@ async fn process_and_respond(
                         if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
                             if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
                                 full_content.push_str(content);
-                                if is_silent { 
-                                    print!("{}", content); 
-                                    io::stdout().flush().ok();
-                                } else {
+                                if !is_silent { 
                                     print_raw(content);
                                 }
                             }
@@ -220,6 +201,11 @@ async fn process_and_respond(
             messages.push(Message { role: "user".to_string(), content: format!("Result:\n{}", exec_result) });
             step_count += 1;
         } else {
+            // 如果沒有 JSON 指令且是單次模式，這才是真正要印給用戶看的最終回覆
+            if is_silent {
+                print!("{}", full_content);
+                io::stdout().flush().ok();
+            }
             break;
         }
     }
