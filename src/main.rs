@@ -34,14 +34,6 @@ struct StreamOptions {
 #[derive(Deserialize, Debug)]
 struct ChatChunk {
     choices: Vec<ChunkChoice>,
-    usage: Option<Usage>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct Usage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -81,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：用戶目前正透過 Telegram (手機) 與你對話。請保持回覆簡潔、美觀。除非用戶要求，否則嚴禁輸出原始程式碼。中間的執行過程將被自動隱藏，請直接在最後一步給出完整答案。".to_string() 
+            content: "注意：用戶目前在手機 (Telegram)。嚴禁編造假數據。如果執行指令失敗（如 429 或空輸出），請誠實告知。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -89,14 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rl = DefaultEditor::new()?;
-    let history_file = "storage/input_history.txt";
-    let _ = rl.load_history(history_file);
-
-    println!("--- 🧠 Rust Bootstrap Agent (V0) ---");
-    println!("📡 API: {}", api_endpoint);
-    println!("🤖 Model: {}", model_name);
-    println!("輸入 '/exit' 結束。'/clear' 重置。按 [ESC] 打斷。");
-
+    println!("--- 🧠 Rust Bootstrap Agent ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -105,25 +90,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = rl.add_history_entry(line.as_str());
                 line.trim().to_string()
             },
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
             Err(_) => break,
         };
-
         if input.is_empty() { continue; }
         if input == "/exit" { break; }
         if input == "/clear" {
             messages.clear();
             messages.push(Message { role: "system".to_string(), content: system_prompt.clone() });
             fs::write(history_path, "[]")?;
-            println!("\n[!] 重置完成。\n");
+            println!("\n[!] 已重置。\n");
             continue;
         }
-
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, false, &api_endpoint, &model_name).await?;
-        println!("\n------------------------------");
     }
-    let _ = rl.save_history(history_file);
     Ok(())
 }
 
@@ -149,15 +129,13 @@ async fn process_and_respond(
             io::stdout().flush().ok();
         };
 
-        if !is_silent {
-            print_raw(&format!("--- Step {} ---\r\nAssistant: ", step_count + 1));
-        }
+        if !is_silent { print_raw(&format!("--- Step {} ---\r\nAssistant: ", step_count + 1)); }
 
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
             stream: true,
-            stream_options: Some(StreamOptions { include_usage: true }),
+            stream_options: None,
         };
 
         let mut full_content = String::new();
@@ -166,15 +144,6 @@ async fn process_and_respond(
         if response.status().is_success() {
             let mut stream = response.bytes_stream();
             while let Some(item) = stream.next().await {
-                if !is_silent && event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                    if let Event::Key(key) = event::read().unwrap() {
-                        if key.code == KeyCode::Esc {
-                            print_raw("\n[!] 已手動打斷。\n");
-                            return Ok(()); 
-                        }
-                    }
-                }
-
                 if let Ok(chunk_bytes) = item {
                     let text = String::from_utf8_lossy(&chunk_bytes);
                     for line in text.split("\n").map(|l| l.trim()).filter(|l| l.starts_with("data: ")) {
@@ -183,9 +152,7 @@ async fn process_and_respond(
                         if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
                             if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
                                 full_content.push_str(content);
-                                if !is_silent { 
-                                    print_raw(content);
-                                }
+                                if !is_silent { print_raw(content); }
                             }
                         }
                     }
@@ -198,13 +165,23 @@ async fn process_and_respond(
 
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { print_raw(&format!("{}\r\n", exec_result)); }
-            messages.push(Message { role: "user".to_string(), content: format!("Result:\n{}", exec_result) });
+            
+            // 幻覺攔截：如果指令結果異常，注入強烈提醒
+            let feedback = if exec_result.contains("Too Many Requests") || exec_result.is_empty() {
+                format!("【系統警示】執行失敗：{}。請誠實回報無法獲取數據，嚴禁憑空編造！", exec_result)
+            } else {
+                format!("這是執行結果：\n{}", exec_result)
+            };
+            
+            messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
-            // 如果沒有 JSON 指令且是單次模式，這才是真正要印給用戶看的最終回覆
             if is_silent {
-                print!("{}", full_content);
-                io::stdout().flush().ok();
+                if full_content.trim().is_empty() {
+                    println!("🤖 [System] 任務已處理，但 Agent 未產出任何回覆。");
+                } else {
+                    println!("{}", full_content);
+                }
             }
             break;
         }
