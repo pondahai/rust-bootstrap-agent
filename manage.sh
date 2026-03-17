@@ -6,6 +6,7 @@
 #   ./manage.sh local          - Start Interactive CLI Agent
 #   ./manage.sh bot start      - Start Telegram Bridge in background
 #   ./manage.sh bot stop       - Stop Telegram Bridge
+#   ./manage.sh bot restart    - Restart Telegram Bridge
 #   ./manage.sh bot logs       - View Telegram Bridge logs
 #   ./manage.sh status         - Check running status
 #   ./manage.sh test-evolution - Run automated evolution verification test
@@ -42,6 +43,7 @@ case "$1" in
         ;;
     "local")
         echo "🚀 Starting Local Interactive CLI Agent..."
+        ~/.cargo/bin/cargo build || exit 1
         [ -f "$ROOT_ENV" ] && export $(grep -v '^#' "$ROOT_ENV" | xargs)
         "$EXE_PATH"
         ;;
@@ -57,10 +59,17 @@ case "$1" in
             "stop")
                 pkill -f "telegram_bridge.py" && echo "✅ Stopped." || echo "⚠️  No bridge running."
                 ;;
+            "restart")
+                echo "🔄 Restarting Telegram Bridge..."
+                pkill -f "telegram_bridge.py" || true
+                sleep 1
+                nohup "$VENV_PYTHON" -u "$BRIDGE_PY" > "$BRIDGE_LOG" 2>&1 &
+                echo "✅ Restarted (PID: $!)."
+                ;;
             "logs")
                 tail -f "$BRIDGE_LOG"
                 ;;
-            *) echo "Usage: ./manage.sh bot {start|stop|logs}" ;;
+            *) echo "Usage: ./manage.sh bot {start|stop|restart|logs}" ;;
         esac
         ;;
     "status")
@@ -71,11 +80,10 @@ case "$1" in
         ;;
     "test-evolution")
         echo "🧪 Running Automated Evolution Test..."
-        # Ensure latest rust build
         ~/.cargo/bin/cargo build || exit 1
         python3 tests/test_evolution.py
         ;;
     *)
-        echo "Usage: ./manage.sh {setup | local | bot start|stop|logs | status | test-evolution}"
+        echo "Usage: ./manage.sh {setup | local | bot start|stop|restart|logs | status | test-evolution}"
         ;;
 esac
