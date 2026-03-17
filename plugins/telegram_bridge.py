@@ -30,7 +30,7 @@ def run_agent_sync(user_input: str) -> str:
     try:
         # Now we just pass the input as an argument
         # Rust will load history.md, process it, and save back automatically
-        result = subprocess.run([exe_path, user_input], capture_output=True, text=True, timeout=120)
+        result = subprocess.run([exe_path, user_input], capture_output=True, text=True, timeout=300)
         
         # In single-input mode, Rust prints only the new assistant message to stdout
         reply = result.stdout.strip()
