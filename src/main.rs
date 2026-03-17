@@ -2,12 +2,10 @@ mod executor;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::io::{self, Write};
 use std::env;
 use futures_util::StreamExt;
-use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::time::Duration;
 use rustyline::DefaultEditor;
@@ -22,8 +20,6 @@ struct Message {
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Value>,
     stream: bool,
 }
 
@@ -68,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "用戶正透過手機對話。請保持精簡。如果是簡單問候請直接回覆。如果是任務請先輸出計畫 JSON。".to_string() 
+            content: "注意：用戶正透過手機對話。請保持精簡。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -76,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rl = DefaultEditor::new()?;
-    println!("--- 🧠 Rust Bootstrap Agent ---");
+    println!("--- 🧠 Rust Bootstrap Agent (Safe Mode) ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -98,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, false, &api_endpoint, &model_name).await?;
+        println!("\n------------------------------");
     }
     Ok(())
 }
@@ -112,7 +109,6 @@ async fn process_and_respond(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut step_count = 0;
     const MAX_STEPS: i32 = 10;
-    let tools_spec = executor::get_tools_spec();
 
     if !is_silent { enable_raw_mode().ok(); }
 
@@ -120,29 +116,35 @@ async fn process_and_respond(
         if step_count >= MAX_STEPS { break; }
         let print_raw = |s: &str| { if !is_silent { print!("{}", s.replace("\n", "\r\n")); io::stdout().flush().ok(); } };
 
+        if !is_silent { print_raw(&format!("--- Step {} ---\r\nAssistant: ", step_count + 1)); }
+
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            tools: Some(tools_spec.clone()),
             stream: true,
         };
 
         let mut full_content = String::new();
         let response = client.post(api_url).json(&request).send().await?;
 
-        if response.status().is_success() {
-            let mut stream = response.bytes_stream();
-            while let Some(item) = stream.next().await {
-                if let Ok(chunk_bytes) = item {
-                    let text = String::from_utf8_lossy(&chunk_bytes);
-                    for line in text.split("\n").map(|l| l.trim()).filter(|l| l.starts_with("data: ")) {
-                        let data = &line[6..];
-                        if data == "[DONE]" { break; }
-                        if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
-                            if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
-                                full_content.push_str(content);
-                                if !is_silent { print_raw(content); }
-                            }
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_else(|_| "無法讀取錯誤內容".to_string());
+            print_raw(&format!("\n❌ API 錯誤 ({}): {}\n", status, err_text));
+            break;
+        }
+
+        let mut stream = response.bytes_stream();
+        while let Some(item) = stream.next().await {
+            if let Ok(chunk_bytes) = item {
+                let text = String::from_utf8_lossy(&chunk_bytes);
+                for line in text.split("\n").map(|l| l.trim()).filter(|l| l.starts_with("data: ")) {
+                    let data = &line[6..];
+                    if data == "[DONE]" { break; }
+                    if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
+                        if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
+                            full_content.push_str(content);
+                            if !is_silent { print_raw(content); }
                         }
                     }
                 }
@@ -154,21 +156,11 @@ async fn process_and_respond(
 
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { println!("{}", exec_result); }
-            let feedback = if exec_result.contains("!!! 指令失敗 !!!") {
-                format!("【指令失敗】原始錯誤：\n{}\n請修正計畫，嚴禁編造！", exec_result)
-            } else {
-                format!("執行成功，真實 Stdout：\n{}", exec_result)
-            };
+            let feedback = format!("執行結果：\n{}", exec_result);
             messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
-            // 如果沒有 JSON 指令，這就是最終回覆
-            if is_silent {
-                // 只有在真的有文字產出時才輸出
-                if !full_content.trim().is_empty() {
-                    println!("{}", full_content);
-                }
-            }
+            if is_silent { println!("{}", full_content); }
             break;
         }
     }
