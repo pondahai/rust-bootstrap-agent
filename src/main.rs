@@ -45,7 +45,6 @@ struct ChunkDelta {
     content: Option<String>,
 }
 
-// 預設配置
 const DEFAULT_API_ENDPOINT: &str = "http://192.168.0.110:8001/v1/chat/completions";
 const DEFAULT_MODEL_NAME: &str = "openai/gpt-oss-120b";
 
@@ -72,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：用戶目前在手機 (Telegram)。嚴禁編造假數據。我看得到 execute_command 的真實 Stdout。請根據真實輸出進行總結，若回報與輸出不符即為失敗。".to_string() 
+            content: "注意：你目前在 Telegram (手機)。嚴禁編造假數據。如果執行指令失敗，請誠實告知。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -121,14 +120,7 @@ async fn process_and_respond(
 
     loop {
         if step_count >= MAX_STEPS { break; }
-        
-        let print_raw = |s: &str| {
-            if is_silent { return; }
-            print!("{}", s.replace("\n", "\r\n"));
-            io::stdout().flush().ok();
-        };
-
-        if !is_silent { print_raw(&format!("--- Step {} ---\r\nAssistant: ", step_count + 1)); }
+        let print_raw = |s: &str| { if !is_silent { print!("{}", s.replace("\n", "\r\n")); io::stdout().flush().ok(); } };
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -163,24 +155,19 @@ async fn process_and_respond(
         messages.push(Message { role: "assistant".to_string(), content: full_content.clone() });
 
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
-            if !is_silent { print_raw(&format!("{}\r\n", exec_result)); }
+            if !is_silent { println!("{}", exec_result); }
             
-            // 實體數據注入：將真實結果餵回 Agent，並強制要求誠實
-            let feedback = format!(
-                "這是物理執行的真實 Stdout (前 1000 字元)：\n---\n{}\n---\n請『僅』根據上述真實數據進行回覆。如果數據顯示為空或 429，請誠實回報無資料，嚴禁根據記憶編造日期或數字！", 
-                if exec_result.len() > 1000 { &exec_result[..1000] } else { &exec_result }
-            );
+            // 強力攔截：如果看到失敗標記，強制注入否定命令
+            let feedback = if exec_result.contains("!!! 指令失敗 !!!") {
+                format!("【硬性攔截】指令執行失敗了！原始錯誤回傳如下：\n{}\n請停止一切編造與模擬行為。誠實告訴用戶執行失敗的原因，嚴禁提供任何數值！", exec_result)
+            } else {
+                format!("這是物理執行的真實輸出：\n{}", exec_result)
+            };
             
             messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
-            if is_silent {
-                if full_content.trim().is_empty() {
-                    println!("🤖 [System] 處理中...");
-                } else {
-                    println!("{}", full_content);
-                }
-            }
+            if is_silent { println!("{}", full_content); }
             break;
         }
     }

@@ -23,7 +23,6 @@ pub struct PromoteSkillArgs {
 }
 
 pub fn extract_json_and_execute(content: &str) -> Option<String> {
-    // 1. 優先嘗試尋找 Markdown JSON 區塊
     let json_str = if let Some(start) = content.find("```json") {
         let block_content = &content[start + 7..];
         if let Some(end) = block_content.find("```") {
@@ -32,22 +31,17 @@ pub fn extract_json_and_execute(content: &str) -> Option<String> {
             block_content.trim().to_string()
         }
     } else {
-        // 2. 尋找最外層的 JSON 結構 (可能是 { } 或 [ ])
         let first_brace = content.find('{').unwrap_or(usize::MAX);
         let first_bracket = content.find('[').unwrap_or(usize::MAX);
         let start = std::cmp::min(first_brace, first_bracket);
-
         if start == usize::MAX { return None; }
-
         let last_brace = content.rfind('}').unwrap_or(0);
         let last_bracket = content.rfind(']').unwrap_or(0);
         let end = std::cmp::max(last_brace, last_bracket);
-
         if end <= start { return None; }
         content[start..=end].trim().to_string()
     };
 
-    // 嘗試解析為單一行動或行動陣列
     if let Ok(action) = serde_json::from_str::<AgentAction>(&json_str) {
         return perform_action(action);
     } else if let Ok(actions) = serde_json::from_str::<Vec<AgentAction>>(&json_str) {
@@ -59,7 +53,6 @@ pub fn extract_json_and_execute(content: &str) -> Option<String> {
         }
         return Some(results.join("\n\n"));
     }
-    
     None
 }
 
@@ -75,7 +68,13 @@ fn perform_action(action: AgentAction) -> Option<String> {
                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
                     let status = o.status.code().map_or("Unknown".to_string(), |c| c.to_string());
-                    Some(format!("--- 執行結果 ({}) ---\nSTDOUT:\n{}\nSTDERR:\n{}", status, stdout, stderr))
+                    
+                    // 強化失敗報告
+                    if status != "0" || stdout.contains("Bad Request") || stdout.contains("400") {
+                        Some(format!("【!!! 指令失敗 !!!】\nExit Code: {}\nSTDOUT (包含錯誤):\n{}\nSTDERR:\n{}", status, stdout, stderr))
+                    } else {
+                        Some(format!("--- 執行成功 ---\nSTDOUT:\n{}\n", stdout))
+                    }
                 }
                 Err(e) => Some(format!("執行錯誤: {}", e)),
             }
@@ -88,52 +87,37 @@ fn perform_action(action: AgentAction) -> Option<String> {
                     Ok(_) => Some(format!("成功將腳本儲存至 {}", path)),
                     Err(e) => Some(format!("儲存腳本失敗: {}", e)),
                 }
-            } else {
-                Some("save_script 參數格式錯誤".to_string())
-            }
+            } else { Some("save_script 參數格式錯誤".to_string()) }
         },
         "promote_skill" => {
             if let Ok(args) = serde_json::from_value::<PromoteSkillArgs>(action.args) {
                 let src = format!("./scripts/{}", args.script_name);
                 let dst = format!("./plugins/{}", args.script_name);
-                
-                println!("--- 進化技能: {} ---", args.skill_name);
-                
                 if let Err(e) = fs::rename(&src, &dst) {
-                    return Some(format!("無法移動腳本: {} (確認來源檔案是否確實存在於 ./scripts/ 中)", e));
+                    return Some(format!("無法移動腳本: {} (確認來源檔案是否存在於 ./scripts/ 中)", e));
                 }
-                
                 let system_path = "./storage/system.md";
                 let mut system_content = fs::read_to_string(system_path).unwrap_or_default();
-                
                 if !system_content.contains("## 🧩 已學會的技能") {
                     system_content.push_str("\n\n## 🧩 已學會的技能\n");
                 }
-                
                 let new_skill = format!("- **{}**: {} (使用 `python plugins/{}`)\n", 
                     args.skill_name, args.description, args.script_name);
-                
                 system_content.push_str(&new_skill);
-                
                 match fs::write(system_path, system_content) {
-                    Ok(_) => Some(format!("✅ 進化成功！新技能 '{}' 已永久內化。下次任務可直接使用該插件。", args.skill_name)),
+                    Ok(_) => Some(format!("✅ 進化成功！新技能 '{}' 已永久內化。", args.skill_name)),
                     Err(e) => Some(format!("檔案移動成功，但更新系統手冊失敗: {}", e)),
                 }
-            } else {
-                Some("promote_skill 參數格式錯誤".to_string())
-            }
+            } else { Some("promote_skill 參數格式錯誤".to_string()) }
         },
         "save_plugin" => {
             if let Ok(args) = serde_json::from_value::<SaveFileArgs>(action.args) {
                 let path = format!("./plugins/{}", args.name);
-                println!("--- 儲存通用插件: {} ---", path);
                 match fs::write(&path, &args.content) {
                     Ok(_) => Some(format!("成功將插件儲存至 {}", path)),
                     Err(e) => Some(format!("儲存插件失敗: {}", e)),
                 }
-            } else {
-                Some("save_plugin 參數格式錯誤".to_string())
-            }
+            } else { Some("save_plugin 參數格式錯誤".to_string()) }
         },
         _ => Some(format!("未知的行動類型: {}", action.action)),
     }
