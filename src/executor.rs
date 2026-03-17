@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Command;
 use std::fs;
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AgentAction {
@@ -23,55 +24,78 @@ pub struct PromoteSkillArgs {
     pub description: String,
 }
 
-/// 返回供 API 使用的工具定義 (OpenAI 標準)
+/// 動態掃描 plugins/ 並返回完整的工具規格
 pub fn get_tools_spec() -> Value {
-    json!([
-        {
+    let mut tools = vec![
+        json!({
             "type": "function",
             "function": {
                 "name": "execute_command",
-                "description": "執行 Linux 系統指令，如 curl, ls, grep 等以獲取即時資訊。",
+                "description": "執行 Linux 指令獲取即時資訊。",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "args": { "type": "string", "description": "要執行的完整指令字串" }
-                    },
+                    "properties": { "args": { "type": "string" } },
                     "required": ["args"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "save_script",
-                "description": "儲存任務專用的臨時腳本到 ./scripts/ 目錄。",
+                "description": "儲存任務專用腳本到 ./scripts/。",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "腳本檔名" },
-                        "content": { "type": "string", "description": "腳本內容" }
+                    "properties": { 
+                        "name": { "type": "string" },
+                        "content": { "type": "string" }
                     },
                     "required": ["name", "content"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "promote_skill",
-                "description": "將已驗證成功的腳本從 ./scripts/ 移動至 ./plugins/ 並記錄為永久技能。",
+                "description": "將已驗證腳本升遷為永久技能/工具。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "script_name": { "type": "string", "description": "原腳本檔名" },
-                        "skill_name": { "type": "string", "description": "新技能名稱" },
-                        "description": { "type": "string", "description": "技能功能描述" }
+                        "script_name": { "type": "string" },
+                        "skill_name": { "type": "string" },
+                        "description": { "type": "string" }
                     },
                     "required": ["script_name", "skill_name", "description"]
                 }
             }
+        })
+    ];
+
+    // 掃描 plugins 目錄下的所有 .py 檔案，將其作為動態工具加入
+    if let Ok(entries) = fs::read_dir("./plugins") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("py") {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem == "telegram_bridge" || stem.starts_with("test") { continue; }
+                
+                tools.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": stem,
+                        "description": format!("已內化的自創工具：執行 plugins/{}.py", stem),
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "args": { "type": "string", "description": "傳遞給腳本的參數" } }
+                        }
+                    }
+                }));
+            }
         }
-    ])
+    }
+
+    Value::Array(tools)
 }
 
 pub fn extract_json_and_execute(content: &str) -> Option<String> {
@@ -121,8 +145,8 @@ fn perform_action(action: AgentAction) -> Option<String> {
                     let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
                     let status = o.status.code().map_or("Unknown".to_string(), |c| c.to_string());
-                    if status != "0" || stdout.contains("Bad Request") || stdout.contains("400") {
-                        Some(format!("【!!! 指令失敗 !!!】\nExit Code: {}\nSTDOUT (包含錯誤):\n{}\nSTDERR:\n{}", status, stdout, stderr))
+                    if status != "0" {
+                        Some(format!("【!!! 指令失敗 !!!】\nExit Code: {}\nSTDOUT:\n{}\nSTDERR:\n{}", status, stdout, stderr))
                     } else {
                         Some(format!("--- 執行成功 ---\nSTDOUT:\n{}\n", stdout))
                     }
@@ -154,12 +178,27 @@ fn perform_action(action: AgentAction) -> Option<String> {
                 let new_skill = format!("- **{}**: {} (使用 `python plugins/{}`)\n", 
                     args.skill_name, args.description, args.script_name);
                 system_content.push_str(&new_skill);
-                match fs::write(system_path, system_content) {
-                    Ok(_) => Some(format!("✅ 進化成功！新技能 '{}' 已永久內化。", args.skill_name)),
-                    Err(e) => Some(format!("檔案移動成功，但更新系統手冊失敗: {}", e)),
-                }
+                fs::write(system_path, system_content).ok();
+                Some(format!("✅ 進化成功！工具 '{}' 已加入 plugins 並內化為原生外部工具。", args.skill_name))
             } else { Some("promote_skill 參數格式錯誤".to_string()) }
         },
-        _ => Some(format!("未知的行動類型: {}", action.action)),
+        // 動態處理自創工具 (如果 action 名稱對應到一個 python 檔案)
+        custom_action => {
+            let py_path = format!("./plugins/{}.py", custom_action);
+            if Path::new(&py_path).exists() {
+                let args_str = action.args.as_str().unwrap_or("");
+                println!("--- 執行自創工具: {} ---", custom_action);
+                let output = Command::new("python3").arg(&py_path).arg(args_str).output();
+                match output {
+                    Ok(o) => {
+                        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                        Some(format!("--- 自創工具 {} 執行結果 ---\n{}", custom_action, stdout))
+                    }
+                    Err(e) => Some(format!("自創工具執行錯誤: {}", e)),
+                }
+            } else {
+                Some(format!("未知的行動類型: {}", custom_action))
+            }
+        }
     }
 }
