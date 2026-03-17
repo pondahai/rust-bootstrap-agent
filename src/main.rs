@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::env;
 use futures_util::StreamExt;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use std::time::Duration;
 use rustyline::DefaultEditor;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -64,19 +65,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(input) = single_input {
-        // --- Telegram 模式 (單次驅動任務) ---
-        messages.push(Message { 
-            role: "system".to_string(), 
-            content: "用戶正透過手機對話。嚴禁編造。請遵循：思考 -> 行動 -> 觀察 -> 總結。".to_string() 
-        });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
         return Ok(());
     }
 
-    // --- 本地互動模式 ---
     let mut rl = DefaultEditor::new()?;
-    println!("--- 🧠 Rust Bootstrap Agent (Barbara Loop Activated) ---");
+    println!("--- 🧠 Rust Bootstrap Agent (Safe Barbara Loop) ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -93,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             messages.clear();
             messages.push(Message { role: "system".to_string(), content: system_prompt.clone() });
             fs::write(history_path, "[]")?;
-            println!("\n[!] 已重置對話。\n");
+            println!("\n[!] 重置完成。\n");
             continue;
         }
         messages.push(Message { role: "user".to_string(), content: input });
@@ -113,61 +108,66 @@ async fn process_and_respond(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut step_count = 0;
     const MAX_STEPS: i32 = 10;
+    let tools_spec = executor::get_tools_spec();
 
     loop {
         if step_count >= MAX_STEPS { break; }
-        let print_raw = |s: &str| { if !is_silent { print!("{}", s.replace("\n", "\r\n")); io::stdout().flush().ok(); } };
-
-        if !is_silent { println!("--- Step {} [Thinking...] ---", step_count + 1); }
+        
+        if !is_silent {
+            println!("--- Step {} ---", step_count + 1);
+            print!("Assistant: ");
+            io::stdout().flush().ok();
+        }
 
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            tools: Some(executor::get_tools_spec()), // 每次循環重新掃描動態工具
+            tools: Some(tools_spec.clone()),
             stream: true,
         };
 
         let mut full_content = String::new();
-        let response = client.post(api_url).json(&request).send().await?;
+        let mut response = client.post(api_url).json(&request).send().await?;
 
-        if response.status().is_success() {
-            let mut stream = response.bytes_stream();
-            while let Some(item) = stream.next().await {
-                if let Ok(chunk_bytes) = item {
-                    let text = String::from_utf8_lossy(&chunk_bytes);
-                    for line in text.split("\n").map(|l| l.trim()).filter(|l| l.starts_with("data: ")) {
+        if !response.status().is_success() {
+            println!("\n❌ API 錯誤: {}", response.status());
+            break;
+        }
+
+        let mut stream = response.bytes_stream();
+        while let Some(item) = stream.next().await {
+            if let Ok(chunk_bytes) = item {
+                let text = String::from_utf8_lossy(&chunk_bytes);
+                for line in text.split("\n") {
+                    let line = line.trim();
+                    if line.starts_with("data: ") {
                         let data = &line[6..];
                         if data == "[DONE]" { break; }
                         if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
                             if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
                                 full_content.push_str(content);
-                                if !is_silent { print_raw(content); }
+                                if !is_silent {
+                                    print!("{}", content);
+                                    io::stdout().flush().ok();
+                                }
                             }
                         }
                     }
                 }
             }
-        } else {
-            print_raw(&format!("\n❌ API 錯誤: {}\n", response.status()));
-            break;
         }
 
         if !is_silent { println!(); }
         messages.push(Message { role: "assistant".to_string(), content: full_content.clone() });
 
-        // 嘗試提取並執行工具
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { println!("🔍 Observation:\n{}", exec_result); }
-            
-            // 將結果作為 Observation 餵回給 LLM (模仿 Barbara 的遞迴)
             messages.push(Message { 
                 role: "user".to_string(), 
                 content: format!("Observation (物理執行結果):\n{}", exec_result) 
             });
             step_count += 1;
-            // 繼續循環，讓 LLM 決定下一步
         } else {
-            // 沒有工具調用，代表對話結束
             if is_silent { println!("{}", full_content); }
             break;
         }
