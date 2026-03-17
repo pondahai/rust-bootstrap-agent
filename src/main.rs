@@ -2,13 +2,11 @@ mod executor;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs;
 use std::io::{self, Write};
 use std::env;
 use futures_util::StreamExt;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use std::time::Duration;
+use crossterm::terminal::{disable_raw_mode};
 use rustyline::DefaultEditor;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -21,8 +19,6 @@ struct Message {
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Value>,
     stream: bool,
 }
 
@@ -71,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rl = DefaultEditor::new()?;
-    println!("--- 🧠 Rust Bootstrap Agent (Safe Barbara Loop) ---");
+    println!("--- 🧠 Rust Bootstrap Agent (Safe Mode) ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -88,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             messages.clear();
             messages.push(Message { role: "system".to_string(), content: system_prompt.clone() });
             fs::write(history_path, "[]")?;
-            println!("\n[!] 重置完成。\n");
+            println!("\n[!] 對話已重置。\n");
             continue;
         }
         messages.push(Message { role: "user".to_string(), content: input });
@@ -108,7 +104,6 @@ async fn process_and_respond(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut step_count = 0;
     const MAX_STEPS: i32 = 10;
-    let tools_spec = executor::get_tools_spec();
 
     loop {
         if step_count >= MAX_STEPS { break; }
@@ -122,12 +117,11 @@ async fn process_and_respond(
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            tools: Some(tools_spec.clone()),
             stream: true,
         };
 
         let mut full_content = String::new();
-        let mut response = client.post(api_url).json(&request).send().await?;
+        let response = client.post(api_url).json(&request).send().await?;
 
         if !response.status().is_success() {
             println!("\n❌ API 錯誤: {}", response.status());
@@ -141,8 +135,8 @@ async fn process_and_respond(
                 for line in text.split("\n") {
                     let line = line.trim();
                     if line.starts_with("data: ") {
-                        let data = &line[6..];
-                        if data == "[DONE]" { break; }
+                        let data = &line[6..].trim();
+                        if *data == "[DONE]" { break; }
                         if let Ok(chunk) = serde_json::from_str::<ChatChunk>(data) {
                             if let Some(content) = chunk.choices.get(0).and_then(|c| c.delta.content.as_ref()) {
                                 full_content.push_str(content);
@@ -161,10 +155,10 @@ async fn process_and_respond(
         messages.push(Message { role: "assistant".to_string(), content: full_content.clone() });
 
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
-            if !is_silent { println!("🔍 Observation:\n{}", exec_result); }
+            if !is_silent { println!("🔍 Observation: {}", exec_result); }
             messages.push(Message { 
                 role: "user".to_string(), 
-                content: format!("Observation (物理執行結果):\n{}", exec_result) 
+                content: format!("Observation:\n{}", exec_result) 
             });
             step_count += 1;
         } else {
