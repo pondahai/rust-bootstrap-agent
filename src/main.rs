@@ -89,6 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(input) = single_input {
         // --- 單次模式 (Telegram / 一次性呼叫) ---
+        // 注入手機模式簡潔提示
+        messages.push(Message { 
+            role: "system".to_string(), 
+            content: "注意：用戶目前正透過 Telegram (手機) 與你對話。請保持回覆簡潔、美觀。除非用戶要求，否則嚴禁輸出原始程式碼或內部的路徑資訊。請直接提供任務結果，並在最後以一行文字總結你的進化行動（如有）。".to_string() 
+        });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
         return Ok(());
