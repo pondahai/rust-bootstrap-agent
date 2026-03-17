@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(input) = single_input {
         messages.push(Message { 
             role: "system".to_string(), 
-            content: "注意：用戶目前在手機 (Telegram)。請遵循「計畫模式」：先輸出計畫與 JSON 指令，嚴禁直接回報數據。過程會被自動隱藏。".to_string() 
+            content: "用戶正透過手機對話。請保持精簡。如果是簡單問候請直接回覆。如果是任務請先輸出計畫 JSON。".to_string() 
         });
         messages.push(Message { role: "user".to_string(), content: input });
         process_and_respond(&client, &mut messages, history_path, true, &api_endpoint, &model_name).await?;
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut rl = DefaultEditor::new()?;
-    println!("--- 🧠 Rust Bootstrap Agent (Plan Mode) ---");
+    println!("--- 🧠 Rust Bootstrap Agent ---");
     loop {
         disable_raw_mode().ok(); 
         let readline = rl.readline("User: ");
@@ -123,7 +123,7 @@ async fn process_and_respond(
         let request = ChatRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            tools: Some(tools_spec.clone()), // 發送工具定義
+            tools: Some(tools_spec.clone()),
             stream: true,
         };
 
@@ -154,26 +154,21 @@ async fn process_and_respond(
 
         if let Some(exec_result) = executor::extract_json_and_execute(&full_content) {
             if !is_silent { println!("{}", exec_result); }
-            
-            // 強制數據注入並提示計畫執行狀態
             let feedback = if exec_result.contains("!!! 指令失敗 !!!") {
-                format!("【計畫執行失敗】原始錯誤回傳：\n{}\n請修正計畫或回報錯誤，嚴禁根據記憶編造數據！", exec_result)
+                format!("【指令失敗】原始錯誤：\n{}\n請修正計畫，嚴禁編造！", exec_result)
             } else {
-                format!("【工具回傳成功】真實 Stdout 如下：\n{}\n請根據此數據進行下一步或給出最終答案。", exec_result)
+                format!("執行成功，真實 Stdout：\n{}", exec_result)
             };
-            
             messages.push(Message { role: "user".to_string(), content: feedback });
             step_count += 1;
         } else {
-            // 檢查幻覺：如果計畫中提到「獲取/查詢」但沒有實際 Action，則攔截
-            if full_content.contains("計畫") && (full_content.contains("查詢") || full_content.contains("抓取")) && step_count == 0 {
-                 let warning = "【系統警告】你制定了計畫但尚未調用工具！請立即輸出 JSON 指令以獲取數據，禁止直接給出答案。";
-                 messages.push(Message { role: "user".to_string(), content: warning.to_string() });
-                 step_count += 1;
-                 continue;
+            // 如果沒有 JSON 指令，這就是最終回覆
+            if is_silent {
+                // 只有在真的有文字產出時才輸出
+                if !full_content.trim().is_empty() {
+                    println!("{}", full_content);
+                }
             }
-
-            if is_silent { println!("{}", full_content); }
             break;
         }
     }
